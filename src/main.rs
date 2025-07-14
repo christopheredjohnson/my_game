@@ -23,9 +23,19 @@ fn main() {
                 bullet_collision,
                 enemy_shoots,
                 update_aiming_state,
+                update_hit_marker,
             ),
         )
         .run();
+}
+
+#[derive(Component)]
+struct HitMarker;
+
+#[derive(Component)]
+struct Health {
+    current: f32,
+    max: f32,
 }
 
 #[derive(Resource)]
@@ -83,12 +93,24 @@ struct AimState {
     transition: f32, // between 0.0 (hipfire) and 1.0 (ADS)
 }
 
+#[derive(Resource)]
+struct HitMarkerState {
+    timer: Timer,
+}
+
 fn setup(
     mut commands: Commands,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
+    commands.insert_resource(HitMarkerState {
+        timer: Timer::from_seconds(0.1, TimerMode::Once),
+    });
+
+    let gun_scene = asset_server.load("Assault Rifle.glb#Scene0");
+
     commands.insert_resource(AimState {
         aiming: false,
         transition: 0.0,
@@ -116,6 +138,23 @@ fn setup(
         transform: Transform::from_xyz(10.0, 10.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
         ..default()
     });
+
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                width: Val::Px(20.0),
+                height: Val::Px(20.0),
+                margin: UiRect::all(Val::Px(-10.0)),
+                ..default()
+            },
+            background_color: BackgroundColor(Color::rgba(1.0, 1.0, 1.0, 0.0)), // invisible initially
+            ..default()
+        },
+        HitMarker,
+    ));
 
     // Ground
     commands.spawn((
@@ -156,6 +195,18 @@ fn setup(
                         },
                         GunBarrel,
                     ));
+
+                    // Gun model (attach here)
+                    camera.spawn(SceneBundle {
+                        scene: gun_scene,
+                        transform: Transform {
+                            translation: Vec3::new(0.15, -0.1, -0.4), // tweak to position in front of camera
+                            // rotation: Quat::from_rotation_y(std::f32::consts::PI),
+                            scale: Vec3::splat(0.25), // adjust based on model size
+                            ..default()
+                        },
+                        ..default()
+                    });
                 });
         });
 
@@ -243,6 +294,10 @@ fn setup(
         Enemy,
         RigidBody::Fixed,
         Collider::capsule_y(0.5, 0.6),
+        Health {
+            current: 100.0,
+            max: 100.0,
+        },
     ));
     // Lock cursor on startup
     let mut window = windows.single_mut();
@@ -252,6 +307,7 @@ fn setup(
 
 fn player_movement(
     keys: Res<ButtonInput<KeyCode>>,
+    aim_state: Res<AimState>,
     mut query: Query<(&Transform, &mut Velocity), With<Player>>,
 ) {
     let (transform, mut velocity) = query.single_mut();
@@ -274,8 +330,9 @@ fn player_movement(
 
     if direction.length_squared() > 0.0 {
         direction = direction.normalize();
-        velocity.linvel.x = direction.x * 5.0;
-        velocity.linvel.z = direction.z * 5.0;
+        let ads_speed_factor = 0.4 + 0.6 * (1.0 - aim_state.transition); // 0.4x when fully aiming
+        velocity.linvel.x = direction.x * 5.0 * ads_speed_factor;
+        velocity.linvel.z = direction.z * 5.0 * ads_speed_factor;
     } else {
         velocity.linvel.x = 0.0;
         velocity.linvel.z = 0.0;
@@ -394,8 +451,9 @@ fn bullet_collision(
     mut collision_events: EventReader<CollisionEvent>,
     mut commands: Commands,
     bullet_query: Query<(Entity, &Shooter), With<Bullet>>,
-    enemy_query: Query<Entity, With<Enemy>>,
+    mut enemy_query: Query<(Entity, &mut Health), With<Enemy>>,
     player_query: Query<Entity, With<Player>>,
+    mut hit_marker_state: ResMut<HitMarkerState>,
 ) {
     for event in collision_events.read() {
         if let CollisionEvent::Started(e1, e2, _) = event {
@@ -409,17 +467,23 @@ fn bullet_collision(
 
             let other_entity = if bullet_entity == *e1 { *e2 } else { *e1 };
 
-            // Avoid friendly fire
             match bullet_shooter {
                 Shooter::Player if player_query.get(other_entity).is_ok() => continue,
-                Shooter::Enemy if enemy_query.get(other_entity).is_ok() => continue,
+                Shooter::Enemy if enemy_query.get_mut(other_entity).is_err() => continue,
                 _ => {}
             }
 
-            info!(
-                "Bullet from {:?} hit entity {:?}",
-                bullet_shooter, other_entity
-            );
+            if let Shooter::Player = bullet_shooter {
+                if let Ok((enemy_entity, mut health)) = enemy_query.get_mut(other_entity) {
+                    health.current -= 25.0;
+                    hit_marker_state.timer.reset();
+
+                    if health.current <= 0.0 {
+                        info!("Enemy {:?} was killed!", enemy_entity);
+                        commands.entity(enemy_entity).despawn_recursive();
+                    }
+                }
+            }
 
             commands.entity(bullet_entity).despawn();
         }
@@ -484,5 +548,19 @@ fn update_camera_fov(mut query: Query<&mut Projection, With<FpsCamera>>, aim_sta
         let ads_fov = std::f32::consts::FRAC_PI_6; // 30 degrees
 
         perspective.fov = base_fov.lerp(ads_fov, aim_state.transition);
+    }
+}
+
+fn update_hit_marker(
+    time: Res<Time>,
+    mut state: ResMut<HitMarkerState>,
+    mut query: Query<&mut BackgroundColor, With<HitMarker>>,
+) {
+    state.timer.tick(time.delta());
+    let alpha = if state.timer.finished() { 0.0 } else { 1.0 };
+
+    if let Ok(mut bg_color) = query.get_single_mut() {
+        // Assume we're using white color with varying alpha
+        bg_color.0 = Color::rgba(1.0, 1.0, 1.0, alpha);
     }
 }
