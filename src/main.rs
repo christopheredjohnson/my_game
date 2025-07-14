@@ -4,11 +4,13 @@ use bevy::{
     utils::info,
     window::{CursorGrabMode, PrimaryWindow},
 };
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_rapier3d::prelude::*;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(WorldInspectorPlugin::default())
         .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         .add_systems(Startup, setup)
@@ -24,6 +26,7 @@ fn main() {
                 enemy_shoots,
                 update_aiming_state,
                 update_hit_marker,
+                toggle_cursor_lock,
             ),
         )
         .run();
@@ -190,7 +193,7 @@ fn setup(
                 .with_children(|camera| {
                     camera.spawn((
                         SpatialBundle {
-                            transform: Transform::from_xyz(0.0, 0.0, -0.5), // adjust forward (local -Z)
+                            transform: Transform::from_xyz(0.5, -0.3, -2.6), // adjust forward (local -Z)
                             ..default()
                         },
                         GunBarrel,
@@ -401,7 +404,14 @@ fn shoot_bullet(
         if shoot_timer.0.finished() {
             let barrel_transform = barrel_query.single();
             let position = barrel_transform.translation();
-            let direction = barrel_transform.forward();
+            let spread = 0.002; // tweak
+            let direction = (barrel_transform.forward().as_vec3()
+                + Vec3::new(
+                    (rand::random::<f32>() - 0.5) * spread,
+                    (rand::random::<f32>() - 0.5) * spread,
+                    (rand::random::<f32>() - 0.5) * spread,
+                ))
+                .normalize();
 
             commands.spawn((
                 PbrBundle {
@@ -415,6 +425,12 @@ fn shoot_bullet(
                 RigidBody::Dynamic,
                 Collider::ball(0.05),
                 Velocity::linear(direction * 100.0),
+                GravityScale(1.0), // simulate gravity on bullet
+                Ccd::enabled(),
+                Damping {
+                    linear_damping: 0.1,
+                    angular_damping: 0.0,
+                },
                 ActiveEvents::COLLISION_EVENTS,
             ));
 
@@ -562,5 +578,24 @@ fn update_hit_marker(
     if let Ok(mut bg_color) = query.get_single_mut() {
         // Assume we're using white color with varying alpha
         bg_color.0 = Color::rgba(1.0, 1.0, 1.0, alpha);
+    }
+}
+
+fn toggle_cursor_lock(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    if keys.just_pressed(KeyCode::Escape) {
+        let mut window = windows.single_mut();
+        match window.cursor.grab_mode {
+            CursorGrabMode::Locked => {
+                window.cursor.grab_mode = CursorGrabMode::None;
+                window.cursor.visible = true;
+            }
+            _ => {
+                window.cursor.grab_mode = CursorGrabMode::Locked;
+                window.cursor.visible = false;
+            }
+        }
     }
 }
